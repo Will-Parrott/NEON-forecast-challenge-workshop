@@ -466,7 +466,7 @@ neon4cast::forecast_output_validator(forecast_file_1)
 
 ```{r eval = FALSE}
 # can uses the neon4cast::forecast_output_validator() to check the forecast is in the right format
-neon4cast::submit(forecast_file = forecast_file_1),
+neon4cast::submit(forecast_file = forecast_file_1,
                   ask = FALSE) # if ask = T (default), it will produce a pop-up box asking if you want to submit
 ```
 
