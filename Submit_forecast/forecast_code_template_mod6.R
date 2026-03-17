@@ -90,7 +90,7 @@ weather_future_daily <- weather_future |>
 
 forecast_horizon <- 30
 forecasted_dates <- seq(from = ymd(forecast_date), to = ymd(forecast_date) + forecast_horizon, by = "day")
-n_members <- 31
+n_members <- 200
 
 # ----- Fit model & generate forecast----
 
@@ -133,6 +133,7 @@ for(i in 1:length(focal_sites)) {
   # Parameter uncertainty prereqs
   param_df <- data.frame(beta1 = rnorm(n_members, coeffs[1], params_se[1]),
                          beta2 = rnorm(n_members, coeffs[2], params_se[2]))
+              # beta1 corresponds to intercept, beta2 corresponds to slope of air temperature
   
   #Process uncertainty prereqs
   sigma <- sd(residuals, na.rm = TRUE)
@@ -151,9 +152,17 @@ for(i in 1:length(focal_sites)) {
     # The model here needs to match the model used in the lm function above (or what model you used in the fit)
     
     # Loop over each ensemble member
+    met_ens_id <- 0
     for(ens in 1:n_members){
+   
+      if(met_ens_id <= 30){
+      met_ens_id <- met_ens_id + 1
+      ens_nm <- paste0(ens, "-", met_ens_id)
+    }else{
+      met_ens_id <- 1
+    }
       
-      met_ens <- weather_ensemble_names[ens]
+      met_ens <- weather_ensemble_names[met_ens_id]
       
       #pull driver ensemble for the relevant date; here we are using all 31 NOAA ensemble members
       temp_driv <- weather_future_daily %>%
@@ -161,12 +170,12 @@ for(i in 1:length(focal_sites)) {
                site_id == curr_site,
                parameter == met_ens)
       
-      forecasted_temperature <- param_df$beta1[ens] + param_df$beta2[ens] * temp_driv$air_temperature + rnorm(n=n_members, mean=0, sd=sigma)
+      forecasted_temperature <- param_df$beta1[met_ens_id] + param_df$beta2[met_ens_id] * temp_driv$air_temperature + rnorm(n=1, mean=0, sd=sigma)
       
       # put all the relevant information into a tibble that we can bind together
       curr_site_df <- tibble(datetime = forecasted_dates[t],
                              site_id = curr_site,
-                             parameter = met_ens,
+                             parameter = ens_nm,
                              prediction = forecasted_temperature,
                              variable = "temperature") #Change this if you are forecasting a different variable
       
