@@ -42,7 +42,7 @@ targets <- targets %>%
 
 
 # ------ Weather data ------
-met_variables <- c("air_temperature")
+met_variables <- c("air_temperature","surface_radiation")
 
 # Past stacked weather -----
 weather_past_s3 <- neon4cast::noaa_stage3()
@@ -85,12 +85,48 @@ weather_future_daily <- weather_future |>
   pivot_wider(names_from = variable, values_from = prediction) |> 
   select(any_of(c('datetime', 'site_id', met_variables, 'parameter')))
 
+# Generate average values for past three days across dataframe
+## Initialize arrays that will store loop values
 
+l_date <- c()
+l_site <- c()
+l_avg <- numeric()
+
+for(i in 1:length(focal_sites)){
+  curr_site <- focal_sites[i]
+  curr_site_weather <- weather_past_daily |> filter(site_id == curr_site)
+  print(curr_site)
+  for(j in 1:length(curr_site_weather$datetime)){
+    curr_date <- curr_site_weather$datetime[j]
+    if(j<9){
+      l_avg<-append(l_avg,NA)
+      l_date<-append(l_date,curr_date)
+      l_site<-append(l_site,curr_site)
+    }else{
+      pthree_weather <- curr_site_weather |> 
+        filter(datetime %in% ((seq.Date(as.Date(curr_date-days(8)),as.Date(curr_date-1),by="day")))) |> 
+        subset(datetime!=curr_date-4)
+      #Debugging stuff below
+      #print(length(pthree_weather$air_temperature))
+      #for(val in 1:length(pthree_weather)){
+        #print(paste(curr_date, pthree_weather$air_temperature[val]))
+      #}
+      #print("-----------")
+      avg <- mean(pthree_weather$air_temperature, na.rm = TRUE)
+      #print(paste("D:",curr_date,"AVG", avg))
+      l_avg<-append(l_avg,avg)
+      l_date<-append(l_date,curr_date)
+      l_site<-append(l_site,curr_site)
+      pthree_weather <- pthree_weather[0,]
+    }
+  }
+}
+pthree_avg_df <- do.call(rbind, Map(data.frame, datetime=l_date, site_id=l_site, average_air=l_avg))
 #--------------------------#
 
 forecast_horizon <- 30
 forecasted_dates <- seq(from = ymd(forecast_date), to = ymd(forecast_date) + forecast_horizon, by = "day")
-n_members <- 200
+n_members <- 310
 
 # ----- Fit model & generate forecast----
 
@@ -98,10 +134,13 @@ n_members <- 200
 targets_lm <- targets |> 
   pivot_wider(names_from = 'variable', values_from = 'observation') |> 
   left_join(weather_past_daily, 
-            by = c("datetime","site_id"))
+            by = c("datetime","site_id")) |> 
+  left_join(pthree_avg_df, by = c("site_id", "datetime"))
+  
+
+forecast_df <- NULL
 
 # Loop through each site to fit the model
-forecast_df <- NULL
 
 for(i in 1:length(focal_sites)) {  
   
@@ -109,7 +148,7 @@ for(i in 1:length(focal_sites)) {
   curr_site<-focal_sites[i]
   
   site_target <- targets_lm |>
-    filter(site_id == curr_site)
+    filter(site_id == curr_site) 
   
   noaa_future_site <- weather_future_daily |> 
     filter(site_id == curr_site)
@@ -119,7 +158,7 @@ for(i in 1:length(focal_sites)) {
   
   #Fit linear model based on past data: water temperature = m * air temperature + b
   #you will need to change the variable on the left side of the ~ if you are forecasting oxygen or chla
-  fit <- lm(site_target$temperature ~ site_target$air_temperature)
+  fit <- lm(site_target$temperature ~ site_target$air_temperature + site_target$average_air)
   fit_summary <- summary(fit)
   mod <- predict(fit, data = model_data)
   mod <- c(NA, mod)
@@ -132,8 +171,9 @@ for(i in 1:length(focal_sites)) {
   # fit <- lm(site_target$temperature ~ ....)
   # Parameter uncertainty prereqs
   param_df <- data.frame(beta1 = rnorm(n_members, coeffs[1], params_se[1]),
-                         beta2 = rnorm(n_members, coeffs[2], params_se[2]))
-              # beta1 corresponds to intercept, beta2 corresponds to slope of air temperature
+                         beta2 = rnorm(n_members, coeffs[2], params_se[2]),
+                         beta3 = rnorm(n_members, coeffs[3], params_se[3]))
+              # beta1 corresponds to intercept, beta2 corresponds to slope of air temperature, beta3 corresponds to past weekly average air temperature
   
   #Process uncertainty prereqs
   sigma <- sd(residuals, na.rm = TRUE)
@@ -155,6 +195,7 @@ for(i in 1:length(focal_sites)) {
     met_ens_id <- 0
     for(ens in 1:n_members){
    
+      #allows for indexing of ensemble members past 31 (max number input NOAA ensemble members)
       if(met_ens_id <= 30){
       met_ens_id <- met_ens_id + 1
       ens_nm <- paste0(ens, "-", met_ens_id)
@@ -170,7 +211,12 @@ for(i in 1:length(focal_sites)) {
                site_id == curr_site,
                parameter == met_ens)
       
-      forecasted_temperature <- param_df$beta1[met_ens_id] + param_df$beta2[met_ens_id] * temp_driv$air_temperature + rnorm(n=1, mean=0, sd=sigma)
+      avg_driv <- pthree_avg_df %>%
+        filter(datetime == forecast_date,
+               site_id == curr_site)
+      
+      #Dr. Thomas, I honestly do not know what to do here. If I'm using past weekly averages for my data, do I need to be re-iterating as the forecast goes on? Where should I implement that?
+      forecasted_temperature <- param_df$beta1[met_ens_id] + param_df$beta2[met_ens_id] * temp_driv$air_temperature + param_df$beta3[met_ens_id]*avg_driv$average_air + rnorm(n=1, mean=0, sd=sigma)
       
       # put all the relevant information into a tibble that we can bind together
       curr_site_df <- tibble(datetime = forecasted_dates[t],
