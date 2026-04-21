@@ -65,10 +65,10 @@ weather_past_daily <- weather_past |>
 
 past_three <- weather_past_daily |> 
   group_by(site_id) |> 
-  mutate(lag1 = lag(air_temperature, n=1),
-         lag2 = lag(air_temperature, n=2),
-         lag3 = lag(air_temperature, n=3),
-         three_mean = (lag1 + lag2 + lag3)/3)
+  mutate(atemp_lag1 = lag(air_temperature, n=1),
+         atemp_lag2 = lag(air_temperature, n=2),
+         atemp_lag3 = lag(air_temperature, n=3),
+         atemp_three_mean = (atemp_lag1 + atemp_lag2 + atemp_lag3)/3)
 
 # Future weather forecast --------
 # New forecast only available at 5am UTC the next day
@@ -148,7 +148,7 @@ targets_lm <- targets |>
 forecast_df <- NULL
 
 # Loop through each site to fit the model
-
+set.seed(123)
 for(i in 1:length(focal_sites)) {  
   
   #curr_site <- focal_sites[i]
@@ -163,7 +163,7 @@ for(i in 1:length(focal_sites)) {
   weather_ensemble_names <- unique(noaa_future_site$parameter)
   
   site_target <- site_target |> 
-    mutate(lag1 = lag(temperature,n=1L)) |> 
+    mutate(lag1 = lag(temperature,n=2)) |> 
     na.omit()
   
   filtered_historical_weather <- weather_past_daily |> 
@@ -172,14 +172,14 @@ for(i in 1:length(focal_sites)) {
   
   combined_weather <- bind_rows(filtered_historical_weather, noaa_future_site) |> 
     group_by(parameter) |> 
-    mutate(lag1 = lag(air_temperature, n=1),
-           lag2 = lag(air_temperature, n=2),
-           lag3 = lag(air_temperature, n=3),
-           three_mean = (lag1 + lag2 + lag3)/3)
+    mutate(atemp_lag1 = lag(air_temperature, n=1),
+           atemp_lag2 = lag(air_temperature, n=2),
+           atemp_lag3 = lag(air_temperature, n=3),
+           three_mean = (atemp_lag1 + atemp_lag2 + atemp_lag3)/3)
   
   #Fit linear model based on past data: water temperature = m * air temperature + b
   #you will need to change the variable on the left side of the ~ if you are forecasting oxygen or chla
-  fit <- lm(site_target$temperature ~ site_target$air_temperature + site_target$three_mean + site_target$lag1)
+  fit <- lm(site_target$temperature ~ site_target$air_temperature + site_target$atemp_three_mean + site_target$lag1)
   fit_summary <- summary(fit)
   mod <- predict(fit, data = model_data)
   mod <- c(NA, mod)
@@ -200,23 +200,18 @@ for(i in 1:length(focal_sites)) {
   #Process uncertainty prereqs
   sigma <- sd(residuals, na.rm = TRUE)
   
-  #Initial conditions prereqs
-  #curr_df <- site_target |> filter(datetime == as.Date('2026-02-28'))
-  #curr_wt <- curr_df$temperature
-  #ic_sd <- 0.1
-  #ic_uc <- rnorm(n_members, mean = curr_wt, sd = ic_sd)
-  
 
   #need a distribution of initial conditions rnorm
-  if(targets_lm$datetime[nrow(targets_lm)] == forecast_date){
+  if(site_target$datetime[nrow(site_target)] == forecast_date){
     initD <- data.frame(temperature = rnorm(n_members, mean = targets_lm$lag1[nrow(targets_lm)], sd = params_se[4]), ensemble = seq(1:n_members))
   }else{
-    initD <- data.frame(temperature = rnorm(n_members, mean = 0, sd = 1), ensemble = seq(1:n_members))
+    rSamp <- sample(site_target$temperature, 30)
+    initD <- data.frame(temperature = rnorm(n_members, mean = mean(rSamp), sd = sd(rSamp)), ensemble = seq(1:n_members))
   }
   # Loop through all forecast dates
   
   for (t in 1:length(forecasted_dates)) {
-    
+    print(forecasted_dates[t])
     
     # use linear regression to forecast water temperature for each ensemble member
     # You will need to modify this line of code if you add additional weather variables or change the form of the model
@@ -242,7 +237,8 @@ for(i in 1:length(focal_sites)) {
       if(t==1){
         init <- initD |> filter(ensemble == ens)
       }else{
-        init<- forecast_df |> filter(datetime==forecasted_dates[t-1]) |> filter(parameter==ens-1)
+        init<- forecast_df |> filter(site_id == curr_site, datetime==forecasted_dates[t-1]) |> filter(parameter==ens)
+        print(nrow(init))
       }
       
       #pull driver ensemble for the relevant date; here we are using all 31 NOAA ensemble members
@@ -261,13 +257,14 @@ for(i in 1:length(focal_sites)) {
       #site_id == curr_site)
       
       
-      forecasted_temperature <- param_df$beta1[ens] + param_df$beta2[ens] * temp_driv$air_temperature + param_df$beta3[ens]*avg_air$three_mean + param_df$beta4[ens]*init$prediction + rnorm(n=1, mean=0, sd=sigma)
+      forecasted_temperature <- param_df$beta1[ens] + param_df$beta2[ens] * temp_driv$air_temperature + param_df$beta3[ens]*avg_air$three_mean + param_df$beta4[ens]*init$temperature + rnorm(n=1, mean=0, sd=sigma)
       
       # put all the relevant information into a tibble that we can bind together
-      curr_site_df <- tibble(datetime = forecasted_dates[t],
+      curr_site_df <- tibble(datetime = as.Date(forecasted_dates[t]),
+                             reference_datetime = forecast_date,
                              site_id = curr_site,
-                             parameter = met_ens,
-                             prediction = forecasted_temperature,
+                             parameter = ens,
+                             temperature = forecasted_temperature,
                              variable = "temperature") #Change this if you are forecasting a different variable
       
       forecast_df <- dplyr::bind_rows(forecast_df, curr_site_df)
@@ -276,6 +273,7 @@ for(i in 1:length(focal_sites)) {
   }
   message(curr_site, ' forecast run')
 }
+forecast_df <- rename(forecast_df, prediction = temperature)
 
 #---- Covert to EFI standard ----
 
@@ -283,7 +281,6 @@ for(i in 1:length(focal_sites)) {
 forecast_df_EFI <- forecast_df %>%
   filter(datetime > forecast_date) %>%
   mutate(model_id = my_model_id,
-         reference_datetime = forecast_date,
          family = 'ensemble',
          duration = 'P1D',
          parameter = as.character(parameter),
